@@ -21,13 +21,13 @@
 #include <string.h>
 #include <signal.h>
 #include <getopt.h>
-#include "vban/vban.h"
-#include "common/socket.h"
-#include "common/audio.h"
-#include "common/logger.h"
-#include "common/packet.h"
-#include "common/version.h"
-#include "common/backend/audio_backend.h"
+#include "../vban/vban.h"
+#include "../common/socket.h"
+#include "../common/audio.h"
+#include "../common/logger.h"
+#include "../common/packet.h"
+#include "../common/version.h"
+#include "../common/backend/audio_backend.h"
 
 struct config_t
 {

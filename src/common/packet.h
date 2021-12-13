@@ -20,7 +20,7 @@
 #define __PACKET_H__
 
 #include <stddef.h>
-#include "vban/vban.h"
+#include "../vban/vban.h"
 #include "stream.h"
 
 /**

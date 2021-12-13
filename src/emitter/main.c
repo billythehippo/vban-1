@@ -21,12 +21,12 @@
 #include <string.h>
 #include <signal.h>
 #include <getopt.h>
-#include "common/version.h"
-#include "common/socket.h"
-#include "common/audio.h"
-#include "common/logger.h"
-#include "common/packet.h"
-#include "common/backend/audio_backend.h"
+#include "../common/version.h"
+#include "../common/socket.h"
+#include "../common/audio.h"
+#include "../common/logger.h"
+#include "../common/packet.h"
+#include "../common/backend/audio_backend.h"
 
 struct config_t
 {
@@ -44,7 +44,10 @@ struct main_t
     char                        buffer[VBAN_PROTOCOL_MAX_SIZE];
 };
 
+uint8_t jack_b = 0;
 static int MainRun = 1;
+long underruns = 0;
+
 void signalHandler(int signum)
 {
     MainRun = 0;
@@ -91,10 +94,10 @@ int get_options(struct config_t* config, int argc, char* const* argv)
 
     // default values
     config->stream.nb_channels  = 2;
-    config->stream.sample_rate  = 44100;
+    config->stream.sample_rate  = 48000;
     config->stream.bit_fmt      = VBAN_BITFMT_16_INT;
     config->audio.buffer_size   = 1024; /*XXX Why ?*/
-
+    config->audio.direction     = AUDIO_IN;
     config->socket.direction    = SOCKET_OUT;
 
     /* yes, I assume config is not 0 */
@@ -170,8 +173,9 @@ int get_options(struct config_t* config, int argc, char* const* argv)
 
     if (!strncmp(config->audio.backend_name, "jack", AUDIO_BACKEND_NAME_SIZE))
     {
-        logger_log(LOG_FATAL, "Sorry jack backend is not ready for emitter yet");
-        return 1;
+        jack_b = 1;
+        //logger_log(LOG_FATAL, "Sorry jack backend is not ready for emitter yet");
+        //return 1;
     }
 
     return 0;
@@ -210,10 +214,13 @@ int main(int argc, char* const* argv)
         return ret;
     }
 
-    ret = audio_set_map_config(main_s.audio, &config.map);
-    if (ret != 0)
+    if (!jack_b)
     {
-        return ret;
+        ret = audio_set_map_config(main_s.audio, &config.map);
+        if (ret != 0)
+        {
+            return ret;
+        }
     }
 
     ret = audio_set_stream_config(main_s.audio, &config.stream);
@@ -223,6 +230,17 @@ int main(int argc, char* const* argv)
     }
 
     audio_get_stream_config(main_s.audio, &stream_config);
+
+    if (jack_b)
+    {
+        config.map.nb_channels = stream_config.nb_channels;
+        ret = audio_set_map_config(main_s.audio, &config.map);
+        if (ret != 0)
+        {
+            return ret;
+        }
+    }
+
     packet_init_header(main_s.buffer, &stream_config, config.stream_name);
     max_size = packet_get_max_payload_size(main_s.buffer);
 
@@ -236,7 +254,12 @@ int main(int argc, char* const* argv)
         }
 
         packet_set_new_content(main_s.buffer, size);
-        ret = packet_check(config.stream_name, main_s.buffer, size + sizeof(struct VBanHeader));
+        /*********************************************************************************************
+         *** Implementation of request - Continue main loop even when "packet prepared is invalid" ***
+         *********************************************************************************************/
+        // this also helped to debug emitter in jack mode :)
+
+        /*ret = packet_check(config.stream_name, main_s.buffer, size + sizeof(struct VBanHeader));
         if (ret != 0)
         {
             logger_log(LOG_ERROR, "%s: packet prepared is invalid", __func__);
@@ -248,8 +271,25 @@ int main(int argc, char* const* argv)
         {
             MainRun = 0;
             break;
+        }//*/
+
+        ret = packet_check(config.stream_name, main_s.buffer, size + sizeof(struct VBanHeader));
+        if (ret != 0)
+        {
+            underruns++;
+            logger_log(LOG_ERROR, "%s: packet prepared is invalid, %ld underrun packets", __func__, underruns);
+        }
+        else
+        {
+            ret = socket_write(main_s.socket, main_s.buffer, size + sizeof(struct VBanHeader));
+            if (ret < 0)
+            {
+                MainRun = 0;
+                break;
+            }
         }
     }
+
 
     audio_release(&main_s.audio);
     socket_release(&main_s.socket);

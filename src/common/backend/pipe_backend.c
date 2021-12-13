@@ -6,7 +6,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include "common/logger.h"
+#include "../../common/logger.h"
 
 #ifndef _WIN32
 #define FIFO_FILENAME   "/tmp/vban_0"

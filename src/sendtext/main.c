@@ -21,10 +21,10 @@
 #include <string.h>
 #include <signal.h>
 #include <getopt.h>
-#include "vban/vban.h"
-#include "common/version.h"
-#include "common/socket.h"
-#include "common/logger.h"
+#include "../vban/vban.h"
+#include "../common/version.h"
+#include "../common/socket.h"
+#include "../common/logger.h"
 
 struct config_t
 {

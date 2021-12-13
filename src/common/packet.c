@@ -20,7 +20,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include "common/logger.h"
+#include "../common/logger.h"
 
 static int packet_pcm_check(char const* buffer, size_t size);
 static size_t vban_sr_from_value(unsigned int value);

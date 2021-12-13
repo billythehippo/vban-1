@@ -19,7 +19,7 @@
 #ifndef __STREAM_H__
 #define __STREAM_H__
 
-#include "vban/vban.h"
+#include "../vban/vban.h"
 
 /**
  * stream_config_t structure.

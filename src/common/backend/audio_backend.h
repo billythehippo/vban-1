@@ -2,8 +2,8 @@
 #define __AUDIO_BACKEND_H__
 
 #include <stdlib.h>
-#include "vban/vban.h"
-#include "common/audio.h"
+#include "../../vban/vban.h"
+#include "../../common/audio.h"
 
 struct audio_backend_t;
 typedef struct audio_backend_t* audio_backend_handle_t;

@@ -1,7 +1,10 @@
-vban - Linux command-line VBAN tools
+vban - Linux command-line VBAN tools (fork)
 ======================================================
 
-&copy; 2015 Benoît Quiniou - quiniouben[at]yahoo(.)fr
+This is a fork of Benoît Quiniou's VBAN cli tools.
+EMITTER and JACK-BACKEND have been little bit reworked:
+1. No turn off when packet is invalid - just message and ignoring this packet.
+2. Jack backend is now READY FOR EMITTER!
 
 vban project is an open-source implementation of VBAN protocol.
 VBAN is a simple audio over UDP protocol proposed by VB-Audio, see [VBAN Audio webpage](https://www.vb-audio.com/Voicemeeter/vban.htm)
@@ -108,3 +111,12 @@ GUI
 ---
 
 This project is only componed of command line tools. If you are looking for a gui, you can take a look at: [VBAN-manager project on GitHub](https://github.com/VBAN-manager/VBAN-manager)
+
+TODO
+
+---
+
+1. Rework default audio mapping for Emitter
+2. Buffer size parameter for Emitter to make it able to work with short buffers (64, 128, 256) in ALSA-mode
+3. Autoconnect for Emitter in JACK mode (as a parameter)
+4. Normal (non-WEB) GUI

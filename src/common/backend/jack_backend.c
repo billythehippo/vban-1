@@ -5,9 +5,10 @@
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>
-#include "common/logger.h"
+//#include <pthread.h>
+#include "../logger.h"
 
-#define NB_BUFFERS  2
+#define NB_BUFFERS 2
 
 struct jack_backend_t
 {
@@ -18,16 +19,24 @@ struct jack_backend_t
     size_t                  buffer_size;
     enum VBanBitResolution  bit_fmt;
     unsigned int            nb_channels;
+    enum audio_direction    direction;
     int                     active;
 };
+long overruns = 0;
 
 static int jack_open(audio_backend_handle_t handle, char const* output_name, enum audio_direction direction, size_t buffer_size, struct stream_config_t const* config);
 static int jack_close(audio_backend_handle_t handle);
 static int jack_write(audio_backend_handle_t handle, char const* data, size_t nb_sample);
-
-static int jack_process_cb(jack_nframes_t nframes, void* arg);
+static int jack_read(audio_backend_handle_t handle, char* data, size_t nb_sample);
+static int jack_process_cb_tx(jack_nframes_t nframes, void* arg);
+static int jack_process_cb_rx(jack_nframes_t nframes, void* arg);
 static void jack_shutdown_cb(void* arg);
-static jack_default_audio_sample_t jack_convert_sample(char const* ptr, enum VBanBitResolution bit_fmt);
+static jack_default_audio_sample_t jack_convert_sample_rx(char const* ptr, enum VBanBitResolution bit_fmt);
+static void jack_convert_sample_tx(char* ptr, jack_default_audio_sample_t sample, enum VBanBitResolution bit_fmt);
+pthread_mutex_t tx_read_thread_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t  data_ready = PTHREAD_COND_INITIALIZER;
+
+
 static int jack_start(struct jack_backend_t* jack_backend)
 {
     int ret = 0;
@@ -36,31 +45,40 @@ static int jack_start(struct jack_backend_t* jack_backend)
     char const** ports;
     size_t port_id;
 
-    ret = jack_activate(jack_backend->jack_client);
-    if (ret)
+    switch (jack_backend->direction)
     {
-        logger_log(LOG_ERROR, "%s: can't activate client", __func__);
-        return ret;
-    }
-
-    logger_log(LOG_DEBUG, "%s: jack activated", __func__);
-
-    for (port = 0; port != jack_backend->nb_channels; ++port)
-    {
-        snprintf(port_name, sizeof(port_name)-1, "playback_%u", (unsigned int)(port+1));
-        jack_backend->ports[port] = jack_port_register(jack_backend->jack_client
-            , port_name, JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
-        if (jack_backend->ports[port] == 0)
+    case AUDIO_IN:
+        for (port = 0; port != jack_backend->nb_channels; ++port)
         {
-            logger_log(LOG_ERROR, "%s: impossible to set jack port for channel %d", __func__, port);
-            jack_close((audio_backend_handle_t)jack_backend);
-            return -ENODEV;
+            snprintf(port_name, sizeof(port_name)-1, "playback_%u", (unsigned int)(port+1));
+            jack_backend->ports[port] = jack_port_register(jack_backend->jack_client, port_name, JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
+            if (jack_backend->ports[port] == 0)
+            {
+                logger_log(LOG_ERROR, "%s: impossible to set jack port for channel %d", __func__, port);
+                jack_close((audio_backend_handle_t)jack_backend);
+                return -ENODEV;
+            }
         }
+        break;
+    default: // AUDIO_OUT:
+
+        for (port = 0; port != jack_backend->nb_channels; ++port)
+        {
+            snprintf(port_name, sizeof(port_name)-1, "capture_%u", (unsigned int)(port+1));
+            jack_backend->ports[port] = jack_port_register(jack_backend->jack_client, port_name, JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+            if (jack_backend->ports[port] == 0)
+            {
+                logger_log(LOG_ERROR, "%s: impossible to set jack port for channel %d", __func__, port);
+                jack_close((audio_backend_handle_t)jack_backend);
+                return -ENODEV;
+            }
+        }
+        break;
     }
 
     //XXX do we really want to autoconnect ? this should be an option
-    ports = jack_get_ports(jack_backend->jack_client, 0, 0,
-                JackPortIsPhysical|JackPortIsInput);
+    /*ports = jack_get_ports(jack_backend->jack_client, 0, 0,
+                JackPortIsPhysical|JackPortIsOutput);
 
     if (ports != 0)
     {
@@ -84,7 +102,16 @@ static int jack_start(struct jack_backend_t* jack_backend)
     else
     {
         logger_log(LOG_WARNING, "%s: could not autoconnect channels", __func__);
+    }//*/
+
+    ret = jack_activate(jack_backend->jack_client);
+    if (ret)
+    {
+        logger_log(LOG_ERROR, "%s: can't activate client", __func__);
+        return ret;
     }
+
+    logger_log(LOG_DEBUG, "%s: jack activated", __func__);
 
     return ret;
 }
@@ -109,6 +136,7 @@ int jack_backend_init(audio_backend_handle_t* handle)
     jack_backend->parent.open               = jack_open;
     jack_backend->parent.close              = jack_close;
     jack_backend->parent.write              = jack_write;
+    jack_backend->parent.read               = jack_read;
 
     *handle = (audio_backend_handle_t)jack_backend;
 
@@ -118,8 +146,9 @@ int jack_backend_init(audio_backend_handle_t* handle)
 int jack_open(audio_backend_handle_t handle, char const* output_name, enum audio_direction direction, size_t buffer_size, struct stream_config_t const* config)
 {
     int ret;
+    uint32_t jbs, res;
     struct jack_backend_t* const jack_backend = (struct jack_backend_t*)handle;
-    jack_nframes_t jack_buffer_size;
+    volatile jack_nframes_t jack_buffer_size;
 
     logger_log(LOG_DEBUG, "%s", __func__);
 
@@ -139,18 +168,39 @@ int jack_open(audio_backend_handle_t handle, char const* output_name, enum audio
         }
     }
 
+    jack_backend->nb_channels   = config->nb_channels;
+    jack_backend->bit_fmt       = config->bit_fmt;
     jack_buffer_size            = jack_get_buffer_size(jack_backend->jack_client) * jack_backend->nb_channels * VBanBitResolutionSize[config->bit_fmt];
     buffer_size                 = ((buffer_size > jack_buffer_size) ? buffer_size : jack_buffer_size) * NB_BUFFERS;
-    jack_backend->nb_channels   = config->nb_channels;
-    jack_backend->bit_fmt= config->bit_fmt;
-
     jack_backend->ring_buffer   = jack_ringbuffer_create(buffer_size);
-
+    jack_backend->direction     = direction;
     char* const zeros = calloc(1, buffer_size / NB_BUFFERS);
     jack_ringbuffer_write(jack_backend->ring_buffer, zeros, buffer_size / NB_BUFFERS);
-    free(zeros);
+    free(zeros);//*/
 
-    ret = jack_set_process_callback(jack_backend->jack_client, jack_process_cb, jack_backend);
+    /*jbs = jack_get_buffer_size(jack_backend->jack_client);  // jack buffer size per channel
+    res = VBanBitResolutionSize[config->bit_fmt];           // sample byte resolution
+    jack_backend->nb_channels   = config->nb_channels;
+    jack_buffer_size            = jbs * jack_backend->nb_channels * res;
+    buffer_size                 = ((buffer_size > jack_buffer_size) ? buffer_size : jack_buffer_size) * NB_BUFFERS;
+    jack_backend->direction     = direction;
+    jack_backend->bit_fmt       = config->bit_fmt;
+    jack_backend->ring_buffer   = jack_ringbuffer_create(buffer_size);
+    //jack_backend->buffer_size   = jbs;
+    char* const zeros = calloc(1, buffer_size / NB_BUFFERS);
+    jack_ringbuffer_write(jack_backend->ring_buffer, zeros, buffer_size / NB_BUFFERS);
+    free(zeros);//*/
+
+    switch (jack_backend->direction)
+    {
+    case AUDIO_IN:       
+        ret = jack_set_process_callback(jack_backend->jack_client, jack_process_cb_tx, jack_backend);
+        break;
+    default: // AUDIO_OUT
+        ret = jack_set_process_callback(jack_backend->jack_client, jack_process_cb_rx, jack_backend);
+        break;
+    }
+
     if (ret)
     {
         logger_log(LOG_ERROR, "%s: impossible to set jack process callback", __func__);
@@ -238,12 +288,157 @@ int jack_write(audio_backend_handle_t handle, char const* data, size_t size)
         return 0;
     }
     
+    while (jack_ringbuffer_write_space(jack_backend->ring_buffer)<size);
     jack_ringbuffer_write(jack_backend->ring_buffer, data, size);
 
     return (ret < 0) ? ret : size;
 }
 
-int jack_process_cb(jack_nframes_t nframes, void* arg)
+static int jack_read(audio_backend_handle_t handle, char* data, size_t size)
+{
+    int ret = 0;
+    struct jack_backend_t* const jack_backend = (struct jack_backend_t*)handle;
+    volatile size_t jsize;
+    //size_t bufSize = jack_backend->nb_channels * ;
+
+    logger_log(LOG_DEBUG, "%s", __func__);
+
+    if ((handle == 0) || (data == 0))
+    {
+        logger_log(LOG_ERROR, "%s: handle or data pointer is null", __func__);
+        return -EINVAL;
+    }
+
+    if (jack_backend->jack_client == 0)
+    {
+        logger_log(LOG_ERROR, "%s: device not open", __func__);
+        return -ENODEV;
+    }
+
+    if (jack_backend->active == 0)
+    {
+        logger_log(LOG_DEBUG, "%s: server not active yet", __func__);
+        return size;
+    }
+
+    pthread_setcanceltype (PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+    pthread_mutex_lock (&tx_read_thread_lock);
+    while (jack_ringbuffer_read_space(jack_backend->ring_buffer)<size) pthread_cond_wait(&data_ready, &tx_read_thread_lock);
+    pthread_mutex_unlock(&tx_read_thread_lock);
+    jack_ringbuffer_read(jack_backend->ring_buffer, data, size);
+
+    return (ret < 0) ? ret : size;
+}
+
+int jack_process_cb_tx(jack_nframes_t nframes, void* arg)
+{
+    struct jack_backend_t* const jack_backend = (struct jack_backend_t*)arg;
+    size_t channel;
+    size_t sample;
+    jack_ringbuffer_data_t rb_data[2];
+    static jack_default_audio_sample_t* buffers[VBAN_CHANNELS_MAX_NB];
+/*    char* ptr;
+    size_t len;
+    size_t index = 0;
+    size_t part;*/
+    size_t sampleSize;
+    size_t bufSize; // size of buffer for ALL channels
+    char sampleParts[8];
+
+    if (arg == 0)
+    {
+        logger_log(LOG_ERROR, "%s: handle pointer is null", __func__);
+        return -EINVAL;
+    }
+
+    logger_log(LOG_DEBUG, "%s", __func__);
+
+    sampleSize = VBanBitResolutionSize[jack_backend->bit_fmt];
+    bufSize = (nframes * jack_backend->nb_channels * sampleSize);
+    jack_backend->active = 1;
+
+    for (channel = 0; channel < jack_backend->nb_channels; channel++)
+    {
+        buffers[channel] = (jack_default_audio_sample_t*)jack_port_get_buffer(jack_backend->ports[channel], nframes);
+    }
+
+    jack_ringbuffer_get_write_vector(jack_backend->ring_buffer, rb_data);
+
+    if ((rb_data[0].len + rb_data[1].len) < bufSize)
+    {
+        logger_log(LOG_WARNING, "%s: short read", __func__);
+        //return 0;
+    }
+
+    // Attempt to mirror the callback process from the receiver's one.
+    // Unfinished. Here's segfaults.
+
+    /*ptr = rb_data[0].buf;
+    len = 0;
+    for (sample = 0; sample != nframes; ++sample)
+    {
+        for (channel = 0; channel != jack_backend->nb_channels; ++channel)
+        {
+            if (index == 0)
+            {
+                if ((len + sampleSize) > rb_data[0].len)
+                {
+                    jack_convert_sample_tx((char*)sampleParts, ((jack_default_audio_sample_t*)buffers[channel])[sample], jack_backend->bit_fmt);
+                    part = 0;
+                    while (ptr != (rb_data[0].buf + rb_data[0].len))
+                    {
+                        *(ptr) = sampleParts[part];
+                        ptr++;
+                        part++;
+                    }
+                    ptr = rb_data[1].buf;
+                    for (; part<VBanBitResolutionSize[jack_backend->bit_fmt]; part++, ptr++)
+                    {
+                        *ptr = sampleParts[part];
+                    }
+
+                    len += sampleSize;
+                    index = 1;
+                    continue;
+                }
+                if (len == rb_data[0].len)
+                {
+                    ptr = rb_data[1].buf;
+                    index = 1;
+                }
+            }
+
+            jack_convert_sample_tx((char*)sampleParts, ((jack_default_audio_sample_t*)buffers[channel])[sample], jack_backend->bit_fmt);
+            ptr += sampleSize;
+            len += sampleSize;
+        }
+    }
+
+    jack_ringbuffer_read_advance(jack_backend->ring_buffer, len);//*/
+
+    // Realisation of TX callback with the official example
+
+    for (sample = 0; sample < nframes; sample++)
+    {
+        if (!(jack_ringbuffer_write_space(jack_backend->ring_buffer)<(sampleSize*jack_backend->nb_channels)))
+        {
+            for (channel = 0; channel < jack_backend->nb_channels; channel++)
+            {
+                jack_convert_sample_tx(sampleParts, (((jack_default_audio_sample_t*)buffers[channel])[sample]), jack_backend->bit_fmt);
+                if (jack_ringbuffer_write(jack_backend->ring_buffer, sampleParts, sampleSize) < sampleSize) overruns++;
+            }
+        }
+    }
+    if (pthread_mutex_trylock(&tx_read_thread_lock)==0)
+    {
+        pthread_cond_signal(&data_ready);
+        pthread_mutex_unlock(&tx_read_thread_lock);
+    }
+
+    return 0;
+}
+
+int jack_process_cb_rx(jack_nframes_t nframes, void* arg)
 {
     struct jack_backend_t* const jack_backend = (struct jack_backend_t*)arg;
     size_t channel;
@@ -302,7 +497,7 @@ int jack_process_cb(jack_nframes_t nframes, void* arg)
                         sampleParts[part] = *ptr;
                     }
 
-                    buffers[channel][sample] = jack_convert_sample((char const*)sampleParts, jack_backend->bit_fmt);
+                    buffers[channel][sample] = jack_convert_sample_rx((char const*)sampleParts, jack_backend->bit_fmt);
                     len += sampleSize;
                     index = 1;
                     continue;
@@ -314,7 +509,7 @@ int jack_process_cb(jack_nframes_t nframes, void* arg)
                 }
             }
 
-            buffers[channel][sample] = jack_convert_sample(ptr, jack_backend->bit_fmt);
+            buffers[channel][sample] = jack_convert_sample_rx(ptr, jack_backend->bit_fmt);
             ptr += sampleSize;
             len += sampleSize;
         }
@@ -340,7 +535,7 @@ void jack_shutdown_cb(void* arg)
     /*XXX how to notify upper layer that we are done ?*/
 }
 
-jack_default_audio_sample_t jack_convert_sample(char const* ptr, enum VBanBitResolution bit_fmt)
+jack_default_audio_sample_t jack_convert_sample_rx(char const* ptr, enum VBanBitResolution bit_fmt)
 {
     int value;
 
@@ -365,5 +560,47 @@ jack_default_audio_sample_t jack_convert_sample(char const* ptr, enum VBanBitRes
         case VBAN_BITFMT_64_FLOAT:
         default:
             return 0.0;
+    }
+}
+
+static void jack_convert_sample_tx(char* ptr, jack_default_audio_sample_t sample, enum VBanBitResolution bit_fmt)
+{
+    int32_t tmp = 0;
+    uint32_t* tp;
+
+    switch (bit_fmt)
+    {
+    case VBAN_BITFMT_8_INT:
+        tmp = (int8_t)((float)(1<<7)*sample);//roundf(127.0f*sample);
+        ptr[0] = tmp&0xFF;
+        break;
+    case VBAN_BITFMT_16_INT:
+        tmp = (int16_t)((float)(1<<15)*sample);//roundf(127.0f*sample);
+        ptr[0] = tmp&0xFF;
+        ptr[1] = (tmp>>8)&0xFF;
+        break;
+    case VBAN_BITFMT_24_INT:
+        tmp = (int32_t)((float)(1<<23)*sample);//roundf(127.0f*sample);
+        ptr[0] = tmp&0xFF;
+        ptr[1] = (tmp>>8)&0xFF;
+        ptr[2] = (tmp>>16)&0xFF;
+        break;
+    case VBAN_BITFMT_32_INT:
+        ptr[0] = tmp&0xFF;
+        ptr[1] = (tmp>>8)&0xFF;
+        ptr[2] = (tmp>>16)&0xFF;
+        ptr[3] = (tmp>>24)&0xFF;
+        break;
+    case VBAN_BITFMT_32_FLOAT:
+        tp = (uint32_t*)(&sample);
+        tmp = *tp;
+        ptr[0] = tmp&0xFF;
+        ptr[1] = (tmp>>8)&0xFF;
+        ptr[2] = (tmp>>16)&0xFF;
+        ptr[3] = (tmp>>24)&0xFF;
+        break;
+    case VBAN_BITFMT_64_FLOAT:
+    default:
+        break;
     }
 }

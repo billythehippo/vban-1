@@ -19,7 +19,7 @@
 #ifndef __AUDIO_H__
 #define __AUDIO_H__
 
-#include "vban/vban.h"
+#include "../vban/vban.h"
 #include "stream.h"
 #include <stddef.h>
 #include <errno.h>

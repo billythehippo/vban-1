@@ -21,7 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "backend/audio_backend.h"
-#include "common/logger.h"
+#include "../common/logger.h"
 
 #define AUDIO_DEVICE        "default"
 

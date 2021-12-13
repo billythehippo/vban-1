@@ -15,7 +15,7 @@ AM_CFLAGS += -DPULSEAUDIO
 endif
 
 if JACK
-AM_LDFLAGS += -ljack
+AM_LDFLAGS += -ljack -lm -pthread
 AM_CFLAGS += -DJACK
 endif
 
