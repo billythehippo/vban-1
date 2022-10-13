@@ -34,6 +34,7 @@ struct config_t
     struct audio_config_t       audio;
     struct stream_config_t      stream;
     struct audio_map_config_t   map;
+    size_t                      autoconnect;
     char                        stream_name[VBAN_STREAM_NAME_SIZE];
 };
 
@@ -41,10 +42,12 @@ struct main_t
 {
     socket_handle_t             socket;
     audio_handle_t              audio;
+    size_t                      autoconnect;
+    struct audio_map_config_t   map;
     char                        buffer[VBAN_PROTOCOL_MAX_SIZE];
 };
 
-uint8_t jack_b = 0;
+
 static int MainRun = 1;
 long underruns = 0;
 
@@ -59,13 +62,14 @@ void usage()
     printf("-i, --ipaddress=IP      : MANDATORY. ipaddress to send stream to\n");
     printf("-p, --port=PORT         : MANDATORY. port to use\n");
     printf("-s, --streamname=NAME   : MANDATORY. streamname to use\n");
-    printf("-b, --backend=TYPE      : audio backend to use. %s\n", audio_backend_get_help());
-    printf("-d, --device=NAME       : Audio device name. This is file name for file backend, server name for jack backend, device for alsa, stream_name for pulseaudio.\n");
+    printf("-b, --backend=TYPE      : audio backend to use.\n                          %s\n", audio_backend_get_help());
+    printf("-q, --quantum=RATE      : Audio buffer size. For ALSA only!\n");
+    printf("-d, --device=NAME       : Audio device name. This is file name for file backend,\n                          server name for jack backend, device for alsa, stream_name for pulseaudio.\n");
     printf("-r, --rate=VALUE        : Audio device sample rate. default 44100\n");
     printf("-n, --nbchannels=VALUE  : Audio device number of channels. default 2\n");
     printf("-f, --format=VALUE      : Audio device sample format (see below). default is 16I (16bits integer)\n");
-    printf("-c, --channels=LIST     : channels from the audio device to use. LIST is of form x,y,z,... default is to forward the stream as it is\n");
-
+    printf("-c, --channels=LIST     : channels from the audio device to use. LIST is of form x,y,z,...\n                          default is to forward the stream as it is\n");
+    printf("-a, --autoconnect=TYPE  : Autoconnect (JACK mode only!): CARD/YES/NO (default - NO)\n                          CARD option makes JACK ports to mimicrate Physical audiocard\n");
     printf("-l, --loglevel=LEVEL    : Log level, from 0 (FATAL) to 4 (DEBUG). default is 1 (ERROR)\n");
     printf("-h, --help              : display this message\n\n");
     printf("%s\n\n", stream_bit_fmt_help());
@@ -75,6 +79,7 @@ int get_options(struct config_t* config, int argc, char* const* argv)
 {
     int c = 0;
     int ret = 0;
+    int chan, map_is_set = 0;
 
     static const struct option options[] =
     {
@@ -82,11 +87,13 @@ int get_options(struct config_t* config, int argc, char* const* argv)
         {"port",        required_argument,  0, 'p'},
         {"streamname",  required_argument,  0, 's'},
         {"backend",     required_argument,  0, 'b'},
+        {"quantum",     required_argument,  0, 'q'},
         {"device",      required_argument,  0, 'd'},
         {"rate",        required_argument,  0, 'r'},
         {"nbchannels",  required_argument,  0, 'n'},
         {"format",      required_argument,  0, 'f'},
         {"channels",    required_argument,  0, 'c'},
+        {"autoconnect", required_argument,  0, 'a'},
         {"loglevel",    required_argument,  0, 'l'},
         {"help",        no_argument,        0, 'h'},
         {0,             0,                  0,  0 }
@@ -96,14 +103,17 @@ int get_options(struct config_t* config, int argc, char* const* argv)
     config->stream.nb_channels  = 2;
     config->stream.sample_rate  = 48000;
     config->stream.bit_fmt      = VBAN_BITFMT_16_INT;
-    config->audio.buffer_size   = 1024; /*XXX Why ?*/
+    config->audio.buffer_size   = 1024; // default, sets by 'q' parameter
     config->audio.direction     = AUDIO_IN;
     config->socket.direction    = SOCKET_OUT;
+    config->autoconnect         = NO;
+
+    fflush(stdout);
 
     /* yes, I assume config is not 0 */
     while (1)
     {
-        c = getopt_long(argc, argv, "i:p:s:b:d:r:n:f:c:l:h", options, 0);
+        c = getopt_long(argc, argv, "i:p:s:b:q:d:r:n:f:c:a:l:h", options, 0);
         if (c == -1)
             break;
 
@@ -125,6 +135,10 @@ int get_options(struct config_t* config, int argc, char* const* argv)
                 strncpy(config->audio.backend_name, optarg, AUDIO_BACKEND_NAME_SIZE-1);
                 break;
 
+            case 'q':
+                config->audio.buffer_size = atoi(optarg);
+                break;
+
             case 'd':
                 strncpy(config->audio.device_name, optarg, AUDIO_DEVICE_NAME_SIZE-1);
                 break;
@@ -135,6 +149,7 @@ int get_options(struct config_t* config, int argc, char* const* argv)
 
             case 'n':
                 config->stream.nb_channels = atoi(optarg);
+                if (!(map_is_set)) for (chan=0; chan<config->stream.nb_channels; chan++) config->map.channels[chan] = chan;
                 break;
 
             case 'f':
@@ -142,7 +157,16 @@ int get_options(struct config_t* config, int argc, char* const* argv)
                 break;
 
             case 'c':
+                map_is_set = 1;
+                // if map is set by -n just clear it
+                memset(config->map.channels, 0, VBAN_CHANNELS_MAX_NB);
                 ret = audio_parse_map_config(&config->map, optarg);
+                break;
+
+            case 'a':
+                if ((optarg[0]=='y')|(optarg[0]=='Y')) config->autoconnect = YES;
+                else if ((optarg[0]=='c')|(optarg[0]=='C')) config->autoconnect = CARD;
+                else config->autoconnect = NO;
                 break;
 
             case 'l':
@@ -171,12 +195,7 @@ int get_options(struct config_t* config, int argc, char* const* argv)
         return 1;
     }
 
-    if (!strncmp(config->audio.backend_name, "jack", AUDIO_BACKEND_NAME_SIZE))
-    {
-        jack_b = 1;
-        //logger_log(LOG_FATAL, "Sorry jack backend is not ready for emitter yet");
-        //return 1;
-    }
+    if (!(map_is_set)) for (chan=0; chan<config->stream.nb_channels; chan++) config->map.channels[chan] = chan;
 
     return 0;
 }
@@ -214,13 +233,22 @@ int main(int argc, char* const* argv)
         return ret;
     }
 
-    if (!jack_b)
+    memcpy(config.stream.streamname, config.stream_name, 16);
+    config.stream.autoconnect = config.autoconnect;
+
+    // FORWARD MAP TO JACK BACKEND INIT
+    if (strncmp(config.audio.backend_name, "jack", AUDIO_BACKEND_NAME_SIZE)==0)
     {
-        ret = audio_set_map_config(main_s.audio, &config.map);
-        if (ret != 0)
-        {
-            return ret;
-        }
+        stream_config.nb_channels = config.map.nb_channels;
+        memcpy(stream_config.map, config.map.channels, VBAN_CHANNELS_MAX_NB);
+        memcpy(config.stream.map, config.map.channels, VBAN_CHANNELS_MAX_NB);
+        if (config.map.nb_channels) config.stream.nb_channels = config.map.nb_channels;
+    }
+
+    ret = audio_set_map_config(main_s.audio, &config.map);
+    if (ret != 0)
+    {
+        return ret;
     }
 
     ret = audio_set_stream_config(main_s.audio, &config.stream);
@@ -230,16 +258,6 @@ int main(int argc, char* const* argv)
     }
 
     audio_get_stream_config(main_s.audio, &stream_config);
-
-    if (jack_b)
-    {
-        config.map.nb_channels = stream_config.nb_channels;
-        ret = audio_set_map_config(main_s.audio, &config.map);
-        if (ret != 0)
-        {
-            return ret;
-        }
-    }
 
     packet_init_header(main_s.buffer, &stream_config, config.stream_name);
     max_size = packet_get_max_payload_size(main_s.buffer);
