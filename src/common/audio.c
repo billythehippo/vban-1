@@ -32,6 +32,9 @@ struct audio_t
     struct audio_map_config_t   map;
 
     audio_backend_handle_t      backend;
+    /* only used with JACK backend */
+    uint32_t                    autoconnect;
+    char                        streamname[16];
     /* only used if there is a map configured */
     char                        buffer[VBAN_DATA_MAX_SIZE];
 };
@@ -96,6 +99,7 @@ int audio_init(audio_handle_t* handle, struct audio_config_t const* config)
     }
 
     (*handle)->config       = *config;
+    (*handle)->autoconnect  = (*config).autoconnect;
 
     logger_log(LOG_INFO, "%s: config is direction %s, backend %s, device %s, buffer size %d",
         __func__, (config->direction == AUDIO_IN) ? "in" : "out", config->backend_name, config->device_name, config->buffer_size);
@@ -136,9 +140,11 @@ void get_device_config(audio_handle_t handle, struct stream_config_t* device_con
 {
     *device_config = handle->stream;
 
-    if ((handle->config.direction == AUDIO_OUT) && (handle->map.nb_channels != 0))
+    //if ((handle->config.direction == AUDIO_OUT) && (handle->map.nb_channels != 0))
+    if (handle->map.nb_channels != 0)
     {
         device_config->nb_channels = handle->map.nb_channels;
+        memcpy(device_config->map, handle->map.channels, VBAN_CHANNELS_MAX_NB);
     }
 }
 
@@ -305,18 +311,32 @@ int audio_map_channels(audio_handle_t handle, char* buffer, size_t size, char re
     memset((reverse == 1) ? buffer : handle->buffer, 0, size);
 
     /* TODO: can this be optimized ? */
-    for (chan = 0; chan != handle->map.nb_channels; ++chan)
-    {
-        if (handle->map.channels[chan] < handle->stream.nb_channels)
-        {
-            for (frame = 0; frame != (size / stream_frame_size); ++frame)
+    if (strncmp(handle->config.backend_name, "jack", 4)==0)
+        for (chan = 0; chan != handle->map.nb_channels; ++chan)
             {
-                orig_ptr = ((reverse == 1) ? handle->buffer : buffer) + (frame * stream_frame_size) + (handle->map.channels[chan] * sample_size);
-                dest_ptr = ((reverse == 1) ? buffer : handle->buffer) + (frame * map_frame_size) + (chan * sample_size);
-                memcpy(dest_ptr, orig_ptr, sample_size);
+                if (chan < handle->stream.nb_channels)
+                {
+                    for (frame = 0; frame != (size / stream_frame_size); ++frame)
+                    {
+                        orig_ptr = ((reverse == 1) ? handle->buffer : buffer) + (frame * stream_frame_size) + chan * sample_size;
+                        dest_ptr = ((reverse == 1) ? buffer : handle->buffer) + (frame * map_frame_size) + (chan * sample_size);
+                        memcpy(dest_ptr, orig_ptr, sample_size);
+                    }
+                }
             }
-        }
-    }
+    else
+        for (chan = 0; chan != handle->map.nb_channels; ++chan)
+            {
+                if (handle->map.channels[chan] < handle->stream.nb_channels)
+                {
+                    for (frame = 0; frame != (size / stream_frame_size); ++frame)
+                    {
+                        orig_ptr = ((reverse == 1) ? handle->buffer : buffer) + (frame * stream_frame_size) + (handle->map.channels[chan] * sample_size);
+                        dest_ptr = ((reverse == 1) ? buffer : handle->buffer) + (frame * map_frame_size) + (chan * sample_size);
+                        memcpy(dest_ptr, orig_ptr, sample_size);
+                    }
+                }
+            }
     
     return ret;
 }

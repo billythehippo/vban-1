@@ -28,8 +28,11 @@
 struct stream_config_t
 {
     unsigned int            nb_channels;
+    uint8_t                 map[VBAN_CHANNELS_MAX_NB];
     unsigned int            sample_rate;
     enum VBanBitResolution  bit_fmt;
+    uint32_t                autoconnect;
+    char                    streamname[16];
 };
 
 /**

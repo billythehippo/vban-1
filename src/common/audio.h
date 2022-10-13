@@ -69,6 +69,7 @@ struct audio_config_t
     char                            backend_name[AUDIO_BACKEND_NAME_SIZE];
     char                            device_name[AUDIO_DEVICE_NAME_SIZE];
     size_t                          buffer_size;
+    size_t                          autoconnect;
 };
 
 /**

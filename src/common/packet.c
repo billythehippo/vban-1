@@ -167,6 +167,7 @@ int packet_get_stream_config(char const* buffer, struct stream_config_t* stream_
     stream_config->nb_channels  = hdr->format_nbc + 1;
     stream_config->sample_rate  = VBanSRList[hdr->format_SR & VBAN_SR_MASK];
     stream_config->bit_fmt      = hdr->format_bit & VBAN_BIT_RESOLUTION_MASK;
+    memcpy(stream_config->streamname, hdr->streamname, 16);
 
     return 0;
 }
