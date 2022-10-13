@@ -19,7 +19,9 @@ struct jack_backend_t
     size_t                  buffer_size;
     enum VBanBitResolution  bit_fmt;
     unsigned int            nb_channels;
+    unsigned char           map[VBAN_CHANNELS_MAX_NB];
     enum audio_direction    direction;
+    uint32_t                autoconnect;
     int                     active;
 };
 long overruns = 0;
@@ -42,16 +44,32 @@ static int jack_start(struct jack_backend_t* jack_backend)
     int ret = 0;
     size_t port;
     char port_name[32];
+    char port_name_template[9];
     char const** ports;
-    size_t port_id;
+    volatile size_t port_id;
+    volatile size_t pports = 0;
+    uint8_t JackFlags;
+
+    memset(port_name_template, 0, 9);
 
     switch (jack_backend->direction)
     {
     case AUDIO_IN:
+        if (jack_backend->autoconnect == CARD)
+        {
+            strcpy(port_name_template, "playback_%u");
+            JackFlags = JackPortIsInput + JackPortIsPhysical;
+        }
+        else
+        {
+            strcpy(port_name_template, "input_%u");
+            JackFlags = JackPortIsInput;
+        }
+
         for (port = 0; port != jack_backend->nb_channels; ++port)
         {
-            snprintf(port_name, sizeof(port_name)-1, "playback_%u", (unsigned int)(port+1));
-            jack_backend->ports[port] = jack_port_register(jack_backend->jack_client, port_name, JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
+            snprintf(port_name, sizeof(port_name)-1, port_name_template, (unsigned int)(port+1));
+            jack_backend->ports[port] = jack_port_register(jack_backend->jack_client, port_name, JACK_DEFAULT_AUDIO_TYPE, JackFlags, 0);
             if (jack_backend->ports[port] == 0)
             {
                 logger_log(LOG_ERROR, "%s: impossible to set jack port for channel %d", __func__, port);
@@ -61,11 +79,21 @@ static int jack_start(struct jack_backend_t* jack_backend)
         }
         break;
     default: // AUDIO_OUT:
+        if (jack_backend->autoconnect == CARD)
+        {
+            strcpy(port_name_template, "capture_%u");
+            JackFlags = JackPortIsOutput + JackPortIsPhysical;
+        }
+        else
+        {
+            strcpy(port_name_template, "output_%u");
+            JackFlags = JackPortIsOutput;
+        }
 
         for (port = 0; port != jack_backend->nb_channels; ++port)
         {
-            snprintf(port_name, sizeof(port_name)-1, "capture_%u", (unsigned int)(port+1));
-            jack_backend->ports[port] = jack_port_register(jack_backend->jack_client, port_name, JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+            snprintf(port_name, sizeof(port_name)-1, port_name_template, (unsigned int)(port+1));
+            jack_backend->ports[port] = jack_port_register(jack_backend->jack_client, port_name, JACK_DEFAULT_AUDIO_TYPE, JackFlags, 0);
             if (jack_backend->ports[port] == 0)
             {
                 logger_log(LOG_ERROR, "%s: impossible to set jack port for channel %d", __func__, port);
@@ -76,39 +104,91 @@ static int jack_start(struct jack_backend_t* jack_backend)
         break;
     }
 
-    //XXX do we really want to autoconnect ? this should be an option
-    /*ports = jack_get_ports(jack_backend->jack_client, 0, 0,
-                JackPortIsPhysical|JackPortIsOutput);
-
-    if (ports != 0)
-    {
-        port_id = 0;
-        while ((ports[port_id] != 0) && (port_id != jack_backend->nb_channels))
-        {
-            ret = jack_connect(jack_backend->jack_client, jack_port_name(jack_backend->ports[port_id]), ports[port_id]);
-            if (ret)
-            {
-                logger_log(LOG_WARNING, "%s: could not autoconnect channel %d", __func__, port_id);
-            }
-            else
-            {
-                logger_log(LOG_DEBUG, "%s: channel %d autoconnected", __func__, port_id);
-            }
-            ++port_id;
-        }
-
-        jack_free(ports);
-    }
-    else
-    {
-        logger_log(LOG_WARNING, "%s: could not autoconnect channels", __func__);
-    }//*/
-
     ret = jack_activate(jack_backend->jack_client);
     if (ret)
     {
         logger_log(LOG_ERROR, "%s: can't activate client", __func__);
         return ret;
+    }
+
+    if (jack_backend->autoconnect == YES)
+    {
+        switch (jack_backend->direction)
+        {
+        case AUDIO_IN:
+            ports = jack_get_ports(jack_backend->jack_client, 0, 0, JackPortIsPhysical|JackPortIsOutput);
+
+            if (ports != 0)
+            {
+                for (port_id=0; port_id<1024; port_id++)
+                {
+                    if (ports[port_id]==0) break;
+                    if (strstr(ports[port_id], "midi")==NULL) pports++;
+                }
+                for (port_id=0; port_id<jack_backend->nb_channels; port_id++)
+                {
+                    if (jack_backend->map[port_id]<=pports)
+                    {
+                        if (ports[jack_backend->map[port_id]]!=NULL) if (strstr(ports[jack_backend->map[port_id]], "midi")==NULL)
+                        {
+                            ret = jack_connect(jack_backend->jack_client, ports[jack_backend->map[port_id]], jack_port_name(jack_backend->ports[port_id]));
+                            if (ret)
+                            {
+                                logger_log(LOG_WARNING, "%s: could not autoconnect channel %d", __func__, port_id);
+                            }
+                            else
+                            {
+                                logger_log(LOG_DEBUG, "%s: channel %d autoconnected", __func__, port_id);
+                            }
+                        }
+                    }
+                }
+
+                jack_free(ports);
+            }
+            else
+            {
+                logger_log(LOG_WARNING, "%s: could not autoconnect channels", __func__);
+            }
+        break;
+        default: // AUDIO_OUT
+            ports = jack_get_ports(jack_backend->jack_client, 0, 0, JackPortIsPhysical|JackPortIsInput);
+
+            if (ports != 0)
+            {
+                for (port_id=0; port_id<1024; port_id++)
+                {
+                    if (ports[port_id]==0) break;
+                    if (strstr(ports[port_id], "midi")==NULL) pports++;
+                }
+
+                for (port_id=0; port_id<jack_backend->nb_channels; port_id++)
+                {
+                    if (jack_backend->map[port_id]<=pports)
+                    {
+                        if (strstr(ports[jack_backend->map[port_id]], "midi")==NULL)
+                        {
+                            ret = jack_connect(jack_backend->jack_client, jack_port_name(jack_backend->ports[port_id]), ports[jack_backend->map[port_id]]);
+                            if (ret)
+                            {
+                                logger_log(LOG_WARNING, "%s: could not autoconnect channel %d", __func__, port_id);
+                            }
+                            else
+                            {
+                                logger_log(LOG_DEBUG, "%s: channel %d autoconnected", __func__, port_id);
+                            }
+                        }
+                    }
+                }
+
+                jack_free(ports);
+            }
+            else
+            {
+                logger_log(LOG_WARNING, "%s: could not autoconnect channels", __func__);
+            }
+        break;
+        }//*/
     }
 
     logger_log(LOG_DEBUG, "%s: jack activated", __func__);
@@ -150,6 +230,27 @@ int jack_open(audio_backend_handle_t handle, char const* output_name, enum audio
     struct jack_backend_t* const jack_backend = (struct jack_backend_t*)handle;
     volatile jack_nframes_t jack_buffer_size;
 
+    jack_backend->direction     = direction;
+    jack_backend->autoconnect   = config->autoconnect;
+    jack_backend->nb_channels   = config->nb_channels;
+    jack_backend->bit_fmt       = config->bit_fmt;
+    memcpy(jack_backend->map, config->map, VBAN_CHANNELS_MAX_NB);
+
+    char name[24];
+    memset(name, 0, 16);
+
+    switch (jack_backend->direction)
+    {
+    case AUDIO_IN:
+        strncpy(name, "VBAN TX ", 8);
+        break;
+    default: // AUDIO_OUT
+        strncpy(name, "VBAN RX ", 8);
+        break;
+    }
+
+    strcat(name, config->streamname);
+
     logger_log(LOG_DEBUG, "%s", __func__);
 
     if (handle == 0)
@@ -160,7 +261,8 @@ int jack_open(audio_backend_handle_t handle, char const* output_name, enum audio
 
     if (jack_backend->jack_client == 0)
     {
-        jack_backend->jack_client = jack_client_open((output_name[0] == '\0') ? "vban" : output_name, 0, 0);
+        //jack_backend->jack_client = jack_client_open((output_name[0] == '\0') ? name : output_name, 0, 0);
+        jack_backend->jack_client = jack_client_open(name, JackNullOption, NULL);
         if (jack_backend->jack_client == 0)
         {
             logger_log(LOG_ERROR, "%s: could not open jack client", __func__);
@@ -168,26 +270,10 @@ int jack_open(audio_backend_handle_t handle, char const* output_name, enum audio
         }
     }
 
-    jack_backend->nb_channels   = config->nb_channels;
-    jack_backend->bit_fmt       = config->bit_fmt;
     jack_buffer_size            = jack_get_buffer_size(jack_backend->jack_client) * jack_backend->nb_channels * VBanBitResolutionSize[config->bit_fmt];
     buffer_size                 = ((buffer_size > jack_buffer_size) ? buffer_size : jack_buffer_size) * NB_BUFFERS;
     jack_backend->ring_buffer   = jack_ringbuffer_create(buffer_size);
-    jack_backend->direction     = direction;
-    char* const zeros = calloc(1, buffer_size / NB_BUFFERS);
-    jack_ringbuffer_write(jack_backend->ring_buffer, zeros, buffer_size / NB_BUFFERS);
-    free(zeros);//*/
-
-    /*jbs = jack_get_buffer_size(jack_backend->jack_client);  // jack buffer size per channel
-    res = VBanBitResolutionSize[config->bit_fmt];           // sample byte resolution
-    jack_backend->nb_channels   = config->nb_channels;
-    jack_buffer_size            = jbs * jack_backend->nb_channels * res;
-    buffer_size                 = ((buffer_size > jack_buffer_size) ? buffer_size : jack_buffer_size) * NB_BUFFERS;
-    jack_backend->direction     = direction;
-    jack_backend->bit_fmt       = config->bit_fmt;
-    jack_backend->ring_buffer   = jack_ringbuffer_create(buffer_size);
-    //jack_backend->buffer_size   = jbs;
-    char* const zeros = calloc(1, buffer_size / NB_BUFFERS);
+    /*char* const zeros = calloc(1, buffer_size / NB_BUFFERS);
     jack_ringbuffer_write(jack_backend->ring_buffer, zeros, buffer_size / NB_BUFFERS);
     free(zeros);//*/
 
@@ -260,6 +346,7 @@ int jack_close(audio_backend_handle_t handle)
 int jack_write(audio_backend_handle_t handle, char const* data, size_t size)
 {
     int ret = 0;
+    size_t available;
     struct jack_backend_t* const jack_backend = (struct jack_backend_t*)handle;
 
     logger_log(LOG_DEBUG, "%s", __func__);
@@ -287,7 +374,11 @@ int jack_write(audio_backend_handle_t handle, char const* data, size_t size)
         logger_log(LOG_WARNING, "%s: short write", __func__);
         return 0;
     }
-    
+
+    //available = jack_ringbuffer_write_space(jack_backend->ring_buffer);
+    //if (available>size) available = size;
+    //else available = (available/(VBanBitResolutionSize[jack_backend->bit_fmt]*jack_backend->nb_channels))*VBanBitResolutionSize[jack_backend->bit_fmt]*jack_backend->nb_channels;
+    //jack_ringbuffer_write(jack_backend->ring_buffer, data, available);
     while (jack_ringbuffer_write_space(jack_backend->ring_buffer)<size);
     jack_ringbuffer_write(jack_backend->ring_buffer, data, size);
 

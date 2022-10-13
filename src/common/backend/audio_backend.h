@@ -8,7 +8,7 @@
 struct audio_backend_t;
 typedef struct audio_backend_t* audio_backend_handle_t;
 
-typedef int (*audio_backend_init_f) (audio_backend_handle_t* handle);
+typedef int (*audio_backend_init_f)     (audio_backend_handle_t* handle);
 typedef int (*audio_backend_open_f)     (audio_backend_handle_t handle, char const* output_name, enum audio_direction direction, size_t buffer_size, struct stream_config_t const* config);
 typedef int (*audio_backend_close_f)    (audio_backend_handle_t handle);
 typedef int (*audio_backend_write_f)    (audio_backend_handle_t handle, char const* data, size_t size);
@@ -20,6 +20,13 @@ struct audio_backend_t
     audio_backend_close_f               close;
     audio_backend_write_f               write;
     audio_backend_read_f                read;
+};
+
+enum autoconnect
+{
+    NO = 0,
+    YES,
+    CARD
 };
 
 int audio_backend_get_by_name(char const* name, audio_backend_handle_t* backend);
