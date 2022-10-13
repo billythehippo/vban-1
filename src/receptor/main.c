@@ -34,6 +34,7 @@ struct config_t
     struct socket_config_t      socket;
     struct audio_config_t       audio;
     struct audio_map_config_t   map;
+    size_t                      autoconnect;
     char                        stream_name[VBAN_STREAM_NAME_SIZE];
 };
 
@@ -42,6 +43,8 @@ struct main_t
     socket_handle_t             socket;
     audio_handle_t              audio;
     char                        buffer[VBAN_PROTOCOL_MAX_SIZE];
+    size_t                      autoconnect;
+    char                        stream_name[VBAN_STREAM_NAME_SIZE];
 };
 
 static int MainRun = 1;
@@ -61,6 +64,7 @@ void usage()
     printf("-c, --channels=LIST     : channels from the stream to use. LIST is of form x,y,z,... default is to forward the stream as it is\n");
     printf("-o, --output=NAME       : DEPRECATED. please use -d\n");
     printf("-d, --device=NAME       : Audio device name. This is file name for file backend, server name for jack backend, device for alsa, stream_name for pulseaudio.\n");
+    printf("-a, --autoconnect=TYPE  : Autoconnect (JACK mode only!): CARD/YES/NO (default - NO)\n                          CARD option makes JACK ports to mimicrate Physical audiocard\n");
     printf("-l, --loglevel=LEVEL    : Log level, from 0 (FATAL) to 4 (DEBUG). default is 1 (ERROR)\n");
     printf("-h, --help              : display this message\n\n");
 }
@@ -109,7 +113,7 @@ static size_t computeSize(unsigned char quality)
 int get_options(struct config_t* config, int argc, char* const* argv)
 {
     int c = 0;
-    int quality = 1;
+    int quality = 0;
     int ret = 0;
 
     static const struct option options[] =
@@ -122,6 +126,7 @@ int get_options(struct config_t* config, int argc, char* const* argv)
         {"channels",    required_argument,  0, 'c'},
         {"output",      required_argument,  0, 'o'},
         {"device",      required_argument,  0, 'd'},
+        {"autoconnect", required_argument,  0, 'a'},
         {"loglevel",    required_argument,  0, 'l'},
         {"help",        no_argument,        0, 'h'},
         {0,             0,                  0,  0 }
@@ -130,7 +135,7 @@ int get_options(struct config_t* config, int argc, char* const* argv)
     /* yes, I assume config is not 0 */
     while (1)
     {
-        c = getopt_long(argc, argv, "i:p:s:b:q:c:o:d:l:h", options, 0);
+        c = getopt_long(argc, argv, "i:p:s:b:q:c:o:d:a:l:h", options, 0);
         if (c == -1)
             break;
 
@@ -163,6 +168,12 @@ int get_options(struct config_t* config, int argc, char* const* argv)
             case 'o':
             case 'd':
                 strncpy(config->audio.device_name, optarg, AUDIO_DEVICE_NAME_SIZE-1);
+                break;
+
+            case 'a':
+                if ((optarg[0]=='y')|(optarg[0]=='Y')) config->autoconnect = YES;
+                else if ((optarg[0]=='c')|(optarg[0]=='C')) config->autoconnect = CARD;
+                else config->autoconnect = NO;
                 break;
 
             case 'l':
@@ -217,6 +228,9 @@ int main(int argc, char* const* argv)
         return ret;
     }
 
+    config.audio.autoconnect = config.autoconnect;
+    main_s.autoconnect = config.autoconnect;
+
     ret = socket_init(&main_s.socket, &config.socket);
     if (ret != 0)
     {
@@ -235,6 +249,9 @@ int main(int argc, char* const* argv)
         return ret;
     }
 
+
+    fflush(stdout);
+
     while (MainRun)
     {
         size = socket_read(main_s.socket, main_s.buffer, VBAN_PROTOCOL_MAX_SIZE);
@@ -246,7 +263,10 @@ int main(int argc, char* const* argv)
 
         if (packet_check(config.stream_name, main_s.buffer, size) == 0)
         {
+            memcpy(main_s.stream_name, config.stream_name, 16);
             packet_get_stream_config(main_s.buffer, &stream_config);
+            stream_config.autoconnect = main_s.autoconnect;
+            memcpy(stream_config.map, config.map.channels, VBAN_CHANNELS_MAX_NB);
 
             ret = audio_set_stream_config(main_s.audio, &stream_config);
             if (ret < 0)
